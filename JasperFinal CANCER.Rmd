@@ -1,0 +1,225 @@
+---
+title: "Analysis of Cancerous ChIP-seq data"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r, eval=TRUE}
+#Load the summits.bed file 
+
+library(ggplot2)
+summits <- 
+read.table("C:/Users/chenn/Documents/bmeg424/Final/cancerdata/new/ENCFF002ACV_summits.bed",
+           header = FALSE)
+
+
+```
+
+
+```{r, eval=TRUE}
+#visualization of peaks
+
+library(openxlsx)
+
+peaks_data <- 
+read.xlsx("C:/Users/chenn/Documents/bmeg424/Final/cancerdata/new/ENCFF002ACV_peaks.xlsx")
+
+# Plot the summit positions
+plot(summits$V2, summits$V5, type = "p", col = "red", pch = 20, 
+     xlab = "Genomic Position", ylab = "Summit Height", 
+     main = "ChIP-seq Summit Positions")
+
+```
+
+
+```{r, eval=TRUE}
+
+#This block of code properly organizes the data into having 10 columns rather 
+#than store all the data in a single column, and sets column names.
+
+library(tidyr)
+library(dplyr)
+
+names(peaks_data)[names(peaks_data) == "chr.start.end.length.abs_summit.pileup.-log10(pvalue).fold_enrichment.-log10(qvalue).name"] <- "new"
+
+peaks_data <- 
+  separate(peaks_data, new, into = paste0("col", 1:10), sep = "\\s+")
+
+col_names <- 
+  c("chr", "start", "end", "length", "abs_summit", "pileup", "-log10(pvalue)", 
+    "fold_enrichment", "-log10(qvalue)", "name")
+
+names(peaks_data) <- col_names[1:length(peaks_data)]
+
+```
+
+
+
+
+```{r, eval=TRUE}
+
+#This block of code is TMM normalization to account for library size
+#Filter out reads below 10cpm.
+
+library(edgeR)
+
+pileup_counts <- peaks_data$pileup
+d <- DGEList(counts = as.numeric(pileup_counts))
+
+# Perform TMM normalization
+d <- calcNormFactors(d, method = "TMM")
+
+normalized_counts <- cpm(d)
+
+threshold <- 10 
+peaks_df <- as.data.frame(peaks_data)
+
+# Filter peaks based on the threshold
+filtered_peaks <- peaks_df[normalized_counts > threshold, ]
+
+```
+
+
+```{r, eval=TRUE}
+#Set the filtered peaks as a data table, and ensure that columns with numeric
+#data is set to numeric in case the data is of "string" type.
+
+library(data.table)
+
+setDT(filtered_peaks)
+
+numeric_cols <- c("start", "end", "length", "abs_summit", "pileup", 
+                  "-log10(pvalue)", "fold_enrichment", "-log10(qvalue)")
+filtered_peaks[,
+              (numeric_cols) := lapply(.SD, as.numeric), .SDcols = numeric_cols]
+
+```
+
+```{r, eval=TRUE}
+#define enhancer regions by extending peak summits
+
+library(GenomicRanges)
+
+peaks_gr <- with(filtered_peaks,
+            GRanges(seqnames = chr, ranges = IRanges(start = start,end = end)))
+
+merged_gr <- reduce(peaks_gr)
+
+merged_peaks_data <- as.data.frame(merged_gr)
+
+```
+
+```{r, eval=TRUE}
+#load human genome reference database
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(org.Hs.eg.db)
+library(GenomeInfoDb)
+library(ChIPseeker)
+
+#Perform and Visualize Peak Annotation
+peakAnno <- annotatePeak(merged_gr, tssRegion =
+                        c(-500, 500), TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene,
+    annoDb = "org.Hs.eg.db")
+
+peakAnno_GR <- as.GRanges(peakAnno)
+peakAnno_DF <- as.data.frame(peakAnno)
+
+plotAnnoBar(peakAnno)
+
+```
+
+```{r, eval=TRUE}
+
+#Plot distribution of peaks around TSS Sites:
+
+plotDistToTSS(peakAnno)
+
+```
+
+```{r, eval=TRUE}
+
+#Describe overlap between annotations:
+library(ggupset)
+
+upsetplot(peakAnno, vennpie = FALSE) +
+  ggtitle("Overlap Between Annotations (Cancer)")
+
+
+```
+
+```{r, eval=TRUE}
+#Save FASTA file for motif analysis
+# Define a function to extract sequences from the genome based on peak 
+#coordinates, Extract sequences based on peak coordinates, 
+#and then write the sequecnes to a FASTA file.
+
+library(BSgenome.Hsapiens.UCSC.hg38) 
+
+
+extract_peak_sequences <- function(chr, start, end) {
+  genome_sequences <- 
+  getSeq(BSgenome.Hsapiens.UCSC.hg38, names=chr, start=start, end=end)
+  
+  return(genome_sequences)
+}
+
+peak_sequences <- extract_peak_sequences(filtered_peaks$chr, 
+                                      filtered_peaks$start, filtered_peaks$end)
+
+# Write sequences to a FASTA file
+writeXStringSet(peak_sequences, file = "peaks.fasta")
+
+
+```
+
+
+```{r, eval=TRUE}
+
+#Motif Analysis
+
+library(Biostrings)
+
+# Load genome sequences
+genome_sequences <-
+  readDNAStringSet("C:/Users/chenn/Documents/bmeg424/Final/peaks.fasta")
+
+# Define motifs with optimized regex
+motifs <- c("GGGCGG", "GGG[AG][AT]C[CT][CT]CC")  # Sp1 and NF-κB motifs
+
+# Perform motif analysis
+results <- list()
+for (motif in motifs) {
+  motif_matches <- gregexpr(motif, as.character(genome_sequences))
+  motif_count <- sum(unlist(lapply(motif_matches, length)))
+  results[[motif]] <- motif_count
+}
+
+# Print results
+for (motif in names(results)) {
+  cat("Motif:", motif, "\n")
+  print(results[[motif]])
+}
+
+```
+
+```{r, eval=TRUE}
+
+# Motif data
+motif_names <- c("Sp1", "NF-kB")
+motif_counts <- c(27192, 19648)
+
+# Create a data frame
+motif_df <- data.frame(Motif = motif_names, Count = motif_counts)
+
+# Plot
+library(ggplot2)
+ggplot(motif_df, aes(x = Motif, y = Count)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Motif Occurrences",
+       x = "Motif",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
